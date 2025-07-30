@@ -78,7 +78,8 @@ def initialize_vlm_model(model_name='Qwen/Qwen2.5-VL-7B-Instruct') :
         model_name,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-    ).to(0).eval()
+        device_map="auto",
+    ).eval()
     processor = AutoProcessor.from_pretrained(model_name)
     return model, processor
 

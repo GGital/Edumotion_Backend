@@ -4,10 +4,11 @@ from model_utils.VLM import *
 from model_utils.post_processor import *
 import shutil
 import os
+import torch
 
 app = FastAPI()
 
-model, processor = initialize_vlm_model()
+model , processor = initialize_vlm_model()
 
 @app.post("/vlm_inference_comp")
 async def vlm_inference_comp_endpoint(
@@ -26,6 +27,7 @@ async def vlm_inference_comp_endpoint(
     os.remove(videoB_path)
     result = convert_escaped_newlines(result[0])
     sections = parse_video_comparison_output(result, threshold)
+    torch.cuda.empty_cache()
     return sections
 
 @app.post("/vlm_inference_ask")
@@ -37,6 +39,7 @@ async def vlm_inference_ask_endpoint(
         shutil.copyfileobj(video.file, buffer)
     result = vlm_inference_ask(model, processor, video_path, sys_prompt=sys_prompt_ask, user_prompt=user_prompt_ask)
     os.remove(video_path)
+    torch.cuda.empty_cache()
     return {"result": result, "score": extract_score_percentage(result)}
 
 if __name__ == "__main__":
