@@ -75,10 +75,10 @@ Score: [X]/1
 
 def initialize_vlm_model(model_name='Qwen/Qwen2.5-VL-7B-Instruct') :
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        model_name,
+        model_id,
         torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
-        ).to(0).eval()
+        attn_implementation="flash_attention_2",
+    ).to(0).eval()
     processor = AutoProcessor.from_pretrained(model_name)
     return model, processor
 
