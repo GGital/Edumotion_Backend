@@ -18,6 +18,8 @@ import torch
 from transformers import VitsTokenizer, VitsModel, set_seed
 import scipy.io.wavfile
 import numpy as np
+from fastdtw import fastdtw
+from scipy.spatial.distance import euclidean
 
 # Import object recognition functions
 from model_utils.object_recognition import (
@@ -28,6 +30,10 @@ from model_utils.object_recognition import (
     compare_images_iou,
     compare_boxes_iou
 )
+
+# Import gesture recognition functions
+from model_utils.model import recognize_gestures_video
+from interpolation_utils.interpolation import interpolate_missing_frames
 
 # Initialize models at startup
 model = None
@@ -699,6 +705,168 @@ async def vlm_inference_comparison(
     except Exception as e:
         print(f"DEBUG: Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error in VLM inference comparison: {str(e)}")
+
+@app.post("/compare-gestures/")
+async def compare_gestures_api(
+    video1: UploadFile = File(..., description="First video file for gesture comparison"),
+    video2: UploadFile = File(..., description="Second video file for gesture comparison")
+):
+    """
+    Compare Gestures Between Two Videos
+    
+    Analyzes hand gestures in two video files and computes their similarity using DTW (Dynamic Time Warping).
+    
+    Parameters:
+    - video1: First video file containing hand gestures
+    - video2: Second video file containing hand gestures
+    
+    Returns:
+    - DTW distance (lower = more similar)
+    - Video analysis information
+    - Performance statistics
+    """
+    import time
+    start_time = time.time()
+    
+    try:
+        # Validate file types
+        if not video1.content_type.startswith('video/') or not video2.content_type.startswith('video/'):
+            raise HTTPException(status_code=400, detail="Both files must be videos")
+        
+        print(f"DEBUG: Starting gesture comparison between '{video1.filename}' and '{video2.filename}'")
+        
+        # Save uploaded files
+        file_save_start = time.time()
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        video1_path = os.path.join(UPLOAD_DIR, f"gesture1_{timestamp}_{video1.filename}")
+        video2_path = os.path.join(UPLOAD_DIR, f"gesture2_{timestamp}_{video2.filename}")
+        
+        with open(video1_path, "wb") as buffer1:
+            shutil.copyfileobj(video1.file, buffer1)
+        with open(video2_path, "wb") as buffer2:
+            shutil.copyfileobj(video2.file, buffer2)
+        
+        file_save_time = time.time() - file_save_start
+        print(f"DEBUG: File saving took {file_save_time:.2f} seconds")
+        
+        # Process video 1
+        video1_start = time.time()
+        print(f"DEBUG: Processing video 1 for gesture recognition...")
+        video1_coords, video1_indices = recognize_gestures_video(video1_path, visualize=False)
+        video1_time = time.time() - video1_start
+        print(f"DEBUG: Video 1 processing took {video1_time:.2f} seconds")
+        print(f"DEBUG: Video 1 detected {len(video1_indices) if video1_indices else 0} gesture frames")
+        
+        # Process video 2
+        video2_start = time.time()
+        print(f"DEBUG: Processing video 2 for gesture recognition...")
+        video2_coords, video2_indices = recognize_gestures_video(video2_path, visualize=False)
+        video2_time = time.time() - video2_start
+        print(f"DEBUG: Video 2 processing took {video2_time:.2f} seconds")
+        print(f"DEBUG: Video 2 detected {len(video2_indices) if video2_indices else 0} gesture frames")
+        
+        # Interpolate missing frames
+        interpolation_start = time.time()
+        print(f"DEBUG: Starting frame interpolation...")
+        
+        if video1_indices:
+            video1_array = interpolate_missing_frames(video1_coords, video1_indices)
+        else:
+            video1_array = []
+            
+        if video2_indices:
+            video2_array = interpolate_missing_frames(video2_coords, video2_indices)
+        else:
+            video2_array = []
+        
+        video1_array = np.array(video1_array)
+        video2_array = np.array(video2_array)
+        
+        interpolation_time = time.time() - interpolation_start
+        print(f"DEBUG: Interpolation took {interpolation_time:.2f} seconds")
+        print(f"DEBUG: Video 1 array shape: {video1_array.shape}")
+        print(f"DEBUG: Video 2 array shape: {video2_array.shape}")
+        
+        # Check if gestures were detected
+        if video1_array.size == 0 or video2_array.size == 0:
+            error_msg = "No hand detected in "
+            if video1_array.size == 0 and video2_array.size == 0:
+                error_msg += "both videos"
+            elif video1_array.size == 0:
+                error_msg += "video 1"
+            else:
+                error_msg += "video 2"
+            
+            # Clean up files
+            for video_path in [video1_path, video2_path]:
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+            
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        # Calculate DTW distance
+        dtw_start = time.time()
+        print(f"DEBUG: Calculating DTW distance...")
+        distance, path = fastdtw(video1_array, video2_array, dist=euclidean)
+        dtw_time = time.time() - dtw_start
+        print(f"DEBUG: DTW calculation took {dtw_time:.2f} seconds")
+        print(f"DEBUG: DTW distance: {distance:.3f}")
+        
+        total_time = time.time() - start_time
+        print(f"DEBUG: Total gesture comparison time: {total_time:.2f} seconds")
+        
+        # Prepare response
+        response_data = {
+            "dtw_distance": round(float(distance), 3),
+            "video1_info": {
+                "filename": video1.filename,
+                "gesture_frames_detected": len(video1_indices) if video1_indices else 0,
+                "array_shape": list(video1_array.shape),
+                "has_gestures": video1_array.size > 0
+            },
+            "video2_info": {
+                "filename": video2.filename,
+                "gesture_frames_detected": len(video2_indices) if video2_indices else 0,
+                "array_shape": list(video2_array.shape),
+                "has_gestures": video2_array.size > 0
+            },
+            "similarity_analysis": {
+                "dtw_distance": round(float(distance), 3),
+                "similarity_description": f"DTW distance of {distance:.3f} (lower values indicate more similar gestures)"
+            },
+            "performance_stats": {
+                "total_time_seconds": round(total_time, 2),
+                "file_save_time_seconds": round(file_save_time, 2),
+                "video1_processing_seconds": round(video1_time, 2),
+                "video2_processing_seconds": round(video2_time, 2),
+                "interpolation_time_seconds": round(interpolation_time, 2),
+                "dtw_calculation_seconds": round(dtw_time, 2)
+            }
+        }
+        
+        # Clean up uploaded files
+        cleanup_start = time.time()
+        for video_path in [video1_path, video2_path]:
+            if os.path.exists(video_path):
+                os.remove(video_path)
+        cleanup_time = time.time() - cleanup_start
+        print(f"DEBUG: Cleanup took {cleanup_time:.2f} seconds")
+        
+        return JSONResponse(content=response_data)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Clean up files in case of error
+        try:
+            for video_path in [video1_path, video2_path]:
+                if 'video_path' in locals() and os.path.exists(video_path):
+                    os.remove(video_path)
+        except:
+            pass
+        
+        print(f"DEBUG: Error in gesture comparison: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error comparing gestures: {str(e)}")
 
 @app.post("/tts/")
 async def text_to_speech_json(request: TTSRequest):
