@@ -25,7 +25,8 @@ from model_utils.object_recognition import (
     recognize_objects_in_image, 
     display_recognition_results,
     is_iou_above_threshold,
-    compare_images_iou
+    compare_images_iou,
+    compare_boxes_iou
 )
 
 # Initialize models at startup
@@ -89,21 +90,35 @@ async def object_recognition_api(
     """
     Object recognition endpoint that processes an uploaded image and detects specified objects.
     """
+    import time
+    start_time = time.time()
+    
     try:
         # Validate file type
         if not image.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
         
+        print(f"DEBUG: Starting single object recognition for '{object_name}'")
+        
         # Save uploaded image temporarily
+        file_save_start = time.time()
         temp_image_path = os.path.join(UPLOAD_DIR, f"temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{image.filename}")
         
         with open(temp_image_path, "wb") as buffer:
             shutil.copyfileobj(image.file, buffer)
         
+        file_save_time = time.time() - file_save_start
+        print(f"DEBUG: File saving took {file_save_time:.2f} seconds")
+        
         # Perform object recognition
+        inference_start = time.time()
+        print(f"DEBUG: Starting object recognition inference...")
         results = recognize_objects_in_image(temp_image_path, object_name, model, processor)
+        inference_time = time.time() - inference_start
+        print(f"DEBUG: Inference took {inference_time:.2f} seconds")
         
         # Process results for JSON response
+        processing_start = time.time()
         response_data = {
             "object_name": object_name,
             "image_filename": image.filename,
@@ -123,9 +138,27 @@ async def object_recognition_api(
                 }
                 response_data["detections"].append(detection)
         
+        processing_time = time.time() - processing_start
+        total_time = time.time() - start_time
+        
+        print(f"DEBUG: Found {len(response_data['detections'])} objects")
+        print(f"DEBUG: Response processing took {processing_time:.2f} seconds")
+        print(f"DEBUG: Total time: {total_time:.2f} seconds")
+        
+        # Add performance stats to response
+        response_data["performance_stats"] = {
+            "total_time_seconds": round(total_time, 2),
+            "file_save_time_seconds": round(file_save_time, 2),
+            "inference_time_seconds": round(inference_time, 2),
+            "processing_time_seconds": round(processing_time, 2)
+        }
+        
         # Clean up temporary file
+        cleanup_start = time.time()
         if os.path.exists(temp_image_path):
             os.remove(temp_image_path)
+        cleanup_time = time.time() - cleanup_start
+        print(f"DEBUG: Cleanup took {cleanup_time:.2f} seconds")
         
         return JSONResponse(content=response_data)
     
@@ -146,12 +179,18 @@ async def compare_objects_api(
     """
     Compare objects in two images using IoU threshold.
     """
+    import time
+    start_time = time.time()
+    
     try:
         # Validate file types
         if not image1.content_type.startswith('image/') or not image2.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="Both files must be images")
         
+        print(f"DEBUG: Starting object comparison for '{object_name}' with threshold {threshold}")
+        
         # Save uploaded images temporarily
+        file_save_start = time.time()
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         temp_image1_path = os.path.join(UPLOAD_DIR, f"temp1_{timestamp}_{image1.filename}")
         temp_image2_path = os.path.join(UPLOAD_DIR, f"temp2_{timestamp}_{image2.filename}")
@@ -161,21 +200,108 @@ async def compare_objects_api(
         with open(temp_image2_path, "wb") as buffer2:
             shutil.copyfileobj(image2.file, buffer2)
         
-        # Compare images
-        is_match = compare_images_iou(temp_image1_path, temp_image2_path, object_name, model, processor, threshold)
+        file_save_time = time.time() - file_save_start
+        print(f"DEBUG: File saving took {file_save_time:.2f} seconds")
+        
+        # Process first image
+        inference1_start = time.time()
+        print(f"DEBUG: Starting object recognition for image 1...")
+        results1 = recognize_objects_in_image(temp_image1_path, object_name, model, processor)
+        inference1_time = time.time() - inference1_start
+        print(f"DEBUG: Image 1 inference took {inference1_time:.2f} seconds")
+        print(f"DEBUG: Image 1 found {len(results1[0]['boxes']) if results1 and len(results1) > 0 else 0} objects")
+        
+        # Process second image
+        inference2_start = time.time()
+        print(f"DEBUG: Starting object recognition for image 2...")
+        results2 = recognize_objects_in_image(temp_image2_path, object_name, model, processor)
+        inference2_time = time.time() - inference2_start
+        print(f"DEBUG: Image 2 inference took {inference2_time:.2f} seconds")
+        print(f"DEBUG: Image 2 found {len(results2[0]['boxes']) if results2 and len(results2) > 0 else 0} objects")
+        
+        # Extract and display detection results
+        def extract_detections(results, image_name):
+            detections = []
+            if results and len(results) > 0:
+                boxes = results[0]["boxes"]
+                scores = results[0]["scores"]
+                labels = results[0]["labels"]
+                
+                for box, score, label in zip(boxes, scores, labels):
+                    detection = {
+                        "bounding_box": [round(float(coord), 2) for coord in box.tolist()],
+                        "confidence": round(float(score), 3),
+                        "label": int(label),
+                        "description": f"Detected a photo of a {object_name} with confidence {round(float(score), 3)} at location {[round(float(coord), 2) for coord in box.tolist()]}"
+                    }
+                    detections.append(detection)
+                    print(f"DEBUG: {image_name} - {detection['description']}")
+            return detections
+        
+        image1_detections = extract_detections(results1, "Image1")
+        image2_detections = extract_detections(results2, "Image2")
+        
+        # Compare results with detailed IoU analysis
+        comparison_start = time.time()
+        print(f"DEBUG: Starting detailed IoU comparison...")
+        
+        # Get the maximum IoU score between any boxes
+        max_iou_score = compare_boxes_iou(results1, results2, object_name)
+        if max_iou_score is None:
+            max_iou_score = 0.0
+        
+        # Calculate similarity percentage (0-1 scale)
+        similarity_percentage = round(max_iou_score, 3)
+        
+        # Determine YES/NO based on simple threshold comparison
+        is_above_threshold = "YES" if similarity_percentage > threshold else "NO"
+        
+        # Also get the complex IoU match for backward compatibility
+        is_match = is_iou_above_threshold(results1, results2, object_name, threshold)
+        
+        comparison_time = time.time() - comparison_start
+        print(f"DEBUG: IoU comparison took {comparison_time:.2f} seconds")
+        print(f"DEBUG: Maximum IoU score: {max_iou_score:.3f}")
+        print(f"DEBUG: Similarity percentage: {similarity_percentage:.3f}")
+        print(f"DEBUG: Is above threshold ({threshold}): {is_above_threshold}")
+        
+        total_time = time.time() - start_time
+        print(f"DEBUG: Total comparison time: {total_time:.2f} seconds")
+        print(f"DEBUG: Breakdown - File save: {file_save_time:.2f}s, Image1: {inference1_time:.2f}s, Image2: {inference2_time:.2f}s, Comparison: {comparison_time:.2f}s")
         
         response_data = {
             "object_name": object_name,
             "threshold": threshold,
             "images_match": is_match,
+            "is_above_threshold": is_above_threshold,
+            "similarity_percentage": similarity_percentage,
+            "max_iou_score": round(max_iou_score, 3),
             "image1_filename": image1.filename,
-            "image2_filename": image2.filename
+            "image2_filename": image2.filename,
+            "image1_detections": image1_detections,
+            "image2_detections": image2_detections,
+            "comparison_summary": {
+                "total_boxes_image1": len(image1_detections),
+                "total_boxes_image2": len(image2_detections),
+                "best_match_iou": round(max_iou_score, 3),
+                "similarity_description": f"The bounding boxes are {round(max_iou_score * 100, 1)}% similar"
+            },
+            "performance_stats": {
+                "total_time_seconds": round(total_time, 2),
+                "file_save_time_seconds": round(file_save_time, 2),
+                "image1_inference_seconds": round(inference1_time, 2),
+                "image2_inference_seconds": round(inference2_time, 2),
+                "comparison_time_seconds": round(comparison_time, 2)
+            }
         }
         
         # Clean up temporary files
+        cleanup_start = time.time()
         for temp_path in [temp_image1_path, temp_image2_path]:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+        cleanup_time = time.time() - cleanup_start
+        print(f"DEBUG: Cleanup took {cleanup_time:.2f} seconds")
         
         return JSONResponse(content=response_data)
     
