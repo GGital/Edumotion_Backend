@@ -482,30 +482,37 @@ async def vlm_inference_comparison(
         print(f"DEBUG: Uploaded video saved as: {uploaded_video_filename}")
         
         # Step 3: Send both videos to external VLM inference API
-        external_api_url = "https://nwljdfqrcl8o1p-7860.proxy.runpod.net/"
+        external_api_url = "https://oj42uymbfcas62-7860.proxy.runpod.net/vlm_inference_comp"
         
         try:
-            # Prepare files for the external API
+            # Prepare files and data for the external API (all as form-data)
             with open(combined_video_path, 'rb') as videoA_file, open(uploaded_video_path, 'rb') as videoB_file:
+                # Prepare form-data exactly as required by the external API
                 files = {
                     'videoA': (combined_video_filename, videoA_file, 'video/mp4'),
-                    'videoB': (uploaded_video_filename, videoB_file, 'video/mp4')
+                    'videoB': (uploaded_video_filename, videoB_file, 'video/mp4'),
+                    'threshold': (None, str(threshold))  # Send threshold as form-data string
                 }
                 
-                data = {
-                    'threshold': threshold
-                }
+                print(f"DEBUG: Sending POST request to: {external_api_url}")
+                print(f"DEBUG: Form-data fields:")
+                print(f"  - videoA: {combined_video_filename} (video file)")
+                print(f"  - videoB: {uploaded_video_filename} (video file)")
+                print(f"  - threshold: '{threshold}' (string)")
                 
-                print(f"DEBUG: Sending request to external API: {external_api_url}")
-                print(f"DEBUG: videoA: {combined_video_filename}, videoB: {uploaded_video_filename}, threshold: {threshold}")
-                
-                # Send POST request to external API
+                # Send POST request to external API with all data as form-data
+                # No query parameters, no additional headers, just pure form-data
                 response = requests.post(
                     external_api_url,
                     files=files,
-                    data=data,
                     timeout=300  # 5 minute timeout
                 )
+                
+                print(f"DEBUG: Request sent successfully")
+                print(f"DEBUG: Response status code: {response.status_code}")
+                print(f"DEBUG: Response headers: {dict(response.headers)}")
+                if response.status_code != 200:
+                    print(f"DEBUG: Response content: {response.text[:500]}...")
                 
                 print(f"DEBUG: External API response status: {response.status_code}")
                 
@@ -570,69 +577,86 @@ async def vlm_inference_comparison(
 @app.post("/tts/")
 async def text_to_speech_json(request: TTSRequest):
     """
-    Text-to-Speech endpoint that accepts JSON body with text to convert to audio using Thai TTS model.
+    Text-to-Speech endpoint that sends text to external TTS API and returns audio file.
     
     Request Body:
     - text: The text to convert to speech
     
     Returns:
-    - Audio file as response
+    - Audio file from external TTS API
     """
     try:
-        # Check if TTS model is available
-        if tts_tokenizer is None or tts_model is None:
-            raise HTTPException(
-                status_code=503, 
-                detail="TTS model is not available. Please check server logs for initialization errors."
-            )
-        
         # Validate input
         if not request.text or request.text.strip() == "":
             raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-        # Tokenize the input text
-        inputs = tts_tokenizer(text=request.text.strip(), return_tensors="pt").to("cuda")
+        # External TTS API URL
+        external_tts_url = "https://oj42uymbfcas62-7860.proxy.runpod.net/tts"
         
-        # Set seed for deterministic output
-        set_seed(456)
+        # Prepare request body for external API
+        tts_payload = {
+            "text": request.text.strip()
+        }
         
-        # Generate audio
-        with torch.no_grad():
-            outputs = tts_model(**inputs)
+        print(f"DEBUG: Sending TTS request to: {external_tts_url}")
+        print(f"DEBUG: Request payload: {tts_payload}")
         
-        waveform = outputs.waveform[0]
-        
-        # Convert PyTorch tensor to NumPy array
-        waveform_array = waveform.cpu().numpy()
-        
-        # Create temporary file for the audio
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        audio_filename = f"tts_output_{timestamp}.wav"
-        audio_path = os.path.join(OUTPUT_DIR, audio_filename)
-        
-        # Save audio file
-        scipy.io.wavfile.write(
-            audio_path, 
-            rate=tts_model.config.sampling_rate, 
-            data=waveform_array
+        # Send POST request to external TTS API
+        response = requests.post(
+            external_tts_url,
+            json=tts_payload,
+            timeout=60,  # 1 minute timeout
+            headers={"Content-Type": "application/json"}
         )
         
-        # Verify the audio file was created
-        if not os.path.exists(audio_path):
-            raise HTTPException(status_code=500, detail="Failed to create audio file")
+        print(f"DEBUG: TTS API response status: {response.status_code}")
+        print(f"DEBUG: TTS API response headers: {dict(response.headers)}")
         
-        # Return the audio file
-        return FileResponse(
-            path=audio_path,
-            filename=audio_filename,
-            media_type='audio/wav',
-            headers={"Content-Disposition": f"attachment; filename={audio_filename}"}
-        )
+        if response.status_code == 200:
+            # Check if response is audio content
+            content_type = response.headers.get('content-type', '')
+            print(f"DEBUG: Response content-type: {content_type}")
+            
+            if 'audio' in content_type or 'wav' in content_type or 'mp3' in content_type:
+                # Save the audio content to a temporary file
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                audio_filename = f"tts_output_{timestamp}.wav"
+                audio_path = os.path.join(OUTPUT_DIR, audio_filename)
+                
+                # Write audio content to file
+                with open(audio_path, 'wb') as audio_file:
+                    audio_file.write(response.content)
+                
+                print(f"DEBUG: Audio file saved as: {audio_filename}")
+                
+                # Return the audio file
+                return FileResponse(
+                    path=audio_path,
+                    filename=audio_filename,
+                    media_type='audio/wav',
+                    headers={"Content-Disposition": f"attachment; filename={audio_filename}"}
+                )
+            else:
+                # If not audio, return the response as JSON
+                try:
+                    return response.json()
+                except:
+                    return {"response": response.text}
+        else:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"External TTS API error: {response.text}"
+            )
     
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to connect to external TTS API: {str(e)}"
+        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error in TTS processing: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
