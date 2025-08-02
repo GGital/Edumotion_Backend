@@ -614,7 +614,7 @@ async def vlm_inference_comparison(
         print(f"DEBUG: Uploaded video saved as: {uploaded_video_filename}")
         
         # Step 3: Send both videos to external VLM inference API
-        external_api_url = "https://oj42uymbfcas62-7860.proxy.runpod.net/vlm_inference_comp"
+        external_api_url = "https://ezj0xms2wnbwzm-7860.proxy.runpod.net/vlm_inference_comp"
         
         try:
             # Prepare files and data for the external API (all as form-data)
@@ -709,19 +709,24 @@ async def vlm_inference_comparison(
 @app.post("/compare-gestures/")
 async def compare_gestures_api(
     video1: UploadFile = File(..., description="First video file for gesture comparison"),
-    video2: UploadFile = File(..., description="Second video file for gesture comparison")
+    video2: UploadFile = File(..., description="Second video file for gesture comparison"),
+    threshold: float = Query(0.5, description="Similarity threshold for comparison (0-1)")
 ):
     """
     Compare Gestures Between Two Videos
     
     Analyzes hand gestures in two video files and computes their similarity using DTW (Dynamic Time Warping).
+    Converts DTW distance to similarity percentage and compares against threshold.
     
     Parameters:
     - video1: First video file containing hand gestures
     - video2: Second video file containing hand gestures
+    - threshold: Similarity threshold (0-1) for YES/NO determination
     
     Returns:
     - DTW distance (lower = more similar)
+    - Similarity percentage (0-1, higher = more similar)
+    - YES/NO threshold comparison result
     - Video analysis information
     - Performance statistics
     """
@@ -733,7 +738,7 @@ async def compare_gestures_api(
         if not video1.content_type.startswith('video/') or not video2.content_type.startswith('video/'):
             raise HTTPException(status_code=400, detail="Both files must be videos")
         
-        print(f"DEBUG: Starting gesture comparison between '{video1.filename}' and '{video2.filename}'")
+        print(f"DEBUG: Starting gesture comparison between '{video1.filename}' and '{video2.filename}' with threshold {threshold}")
         
         # Save uploaded files
         file_save_start = time.time()
@@ -812,12 +817,29 @@ async def compare_gestures_api(
         print(f"DEBUG: DTW calculation took {dtw_time:.2f} seconds")
         print(f"DEBUG: DTW distance: {distance:.3f}")
         
+        # Convert DTW distance to similarity percentage (0-1)
+        # Using exponential decay: similarity = exp(-distance/scale_factor)
+        # Scale factor chosen to give reasonable similarity values
+        scale_factor = 100.0  # Adjust this based on typical DTW distances in your domain
+        similarity_percentage = float(np.exp(-distance / scale_factor))
+        similarity_percentage = round(similarity_percentage, 3)
+        
+        # Determine YES/NO based on threshold comparison
+        is_above_threshold = "YES" if similarity_percentage > threshold else "NO"
+        
+        print(f"DEBUG: Similarity percentage: {similarity_percentage:.3f}")
+        print(f"DEBUG: Threshold: {threshold}")
+        print(f"DEBUG: Is above threshold: {is_above_threshold}")
+        
         total_time = time.time() - start_time
         print(f"DEBUG: Total gesture comparison time: {total_time:.2f} seconds")
         
         # Prepare response
         response_data = {
             "dtw_distance": round(float(distance), 3),
+            "similarity_percentage": similarity_percentage,
+            "threshold": threshold,
+            "is_above_threshold": is_above_threshold,
             "video1_info": {
                 "filename": video1.filename,
                 "gesture_frames_detected": len(video1_indices) if video1_indices else 0,
@@ -832,7 +854,10 @@ async def compare_gestures_api(
             },
             "similarity_analysis": {
                 "dtw_distance": round(float(distance), 3),
-                "similarity_description": f"DTW distance of {distance:.3f} (lower values indicate more similar gestures)"
+                "similarity_percentage": similarity_percentage,
+                "threshold": threshold,
+                "is_above_threshold": is_above_threshold,
+                "similarity_description": f"Gestures are {round(similarity_percentage * 100, 1)}% similar (DTW distance: {distance:.3f})"
             },
             "performance_stats": {
                 "total_time_seconds": round(total_time, 2),
@@ -885,7 +910,7 @@ async def text_to_speech_json(request: TTSRequest):
             raise HTTPException(status_code=400, detail="Text cannot be empty")
         
         # External TTS API URL
-        external_tts_url = "https://oj42uymbfcas62-7860.proxy.runpod.net/tts"
+        external_tts_url = "https://ezj0xms2wnbwzm-7860.proxy.runpod.net/tts"
         
         # Prepare request body for external API
         tts_payload = {
